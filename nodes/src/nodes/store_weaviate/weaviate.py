@@ -45,15 +45,7 @@ from weaviate.classes.config import VectorDistances
 from weaviate.util import generate_uuid5
 import weaviate.classes.config as wc
 
-try:
-    from weaviate.exceptions import UnexpectedStatusCodeError
-except ImportError:
-    # Test stubs of the weaviate package may not provide the exceptions
-    # module; this fallback is never raised by a real client, it only keeps
-    # the except clause below valid when the package is stubbed
-    class UnexpectedStatusCodeError(Exception):
-        status_code: int | None = None
-
+from weaviate.exceptions import UnexpectedStatusCodeError
 
 from ai.common.schema import Doc, DocFilter, DocMetadata, QuestionText
 from ai.common.store import DocumentStoreBase
@@ -226,9 +218,9 @@ class Store(DocumentStoreBase):
             # Newer Weaviate Cloud clusters restrict the vector index type and
             # reject hnsw with 422 CONFIG_NOT_ALLOWED (only their hfresh index
             # is allowed). Retry with hfresh, keeping the distance metric.
-            hfresh = getattr(wc.Configure.VectorIndex, 'hfresh', None)
-            if hnswError.status_code != 422 or hfresh is None:
+            if hnswError.status_code != 422:
                 raise
+            hfresh = wc.Configure.VectorIndex.hfresh
 
             # hfresh accepts fewer distance metrics than hnsw. Retrying with one
             # it cannot take would bury the actionable "hnsw not allowed" error
