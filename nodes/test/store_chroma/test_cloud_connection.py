@@ -45,6 +45,11 @@ _STUB_MODULE_NAMES = (
 #: Every kwarg the store hands to chromadb.HttpClient, newest call last.
 _CLIENT_CALLS: list[dict] = []
 
+#: The stub transport module the shim patches. Held here rather than re-imported
+#: in the tests: the stubs are scoped to loading `chroma.py` and are gone by the
+#: time a test body runs, and the real chromadb is not installed.
+_FASTAPI_STUB: types.ModuleType | None = None
+
 
 def _install_stubs() -> None:
     """Stub the third-party packages `chroma.py` imports at module scope."""
@@ -75,6 +80,9 @@ def _install_stubs() -> None:
     sys.modules['chromadb.api'] = chromadb_api
     sys.modules['chromadb.api.fastapi'] = chromadb_fastapi
 
+    global _FASTAPI_STUB
+    _FASTAPI_STUB = chromadb_fastapi
+
     numpy_mod = types.ModuleType('numpy')
     numpy_mod.exp = math.exp
     numpy_mod.int64 = int
@@ -96,27 +104,34 @@ def _scoped_stubs() -> Iterator[None]:
 
 
 def _load_module():
+    """Import `chroma.py`. The caller must already hold the stub context."""
     nodes_root = Path(__file__).resolve().parent.parent.parent
     chroma_py = nodes_root / 'src' / 'nodes' / 'store_chroma' / 'chroma.py'
-    with _scoped_stubs():
-        spec = importlib.util.spec_from_file_location('chroma_cloud_under_test', chroma_py)
-        assert spec is not None and spec.loader is not None
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
-        return module
+    spec = importlib.util.spec_from_file_location('chroma_cloud_under_test', chroma_py)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 def _connect(monkeypatch: pytest.MonkeyPatch, config: dict) -> dict:
-    """Build a Store with `config` and return the kwargs it passed to HttpClient."""
-    module = _load_module()
+    """Build a Store with `config` and return the kwargs it passed to HttpClient.
+
+    Both the import and the construction run inside the stub context: the shim
+    installs itself while the Store is being built, so `chromadb.api.fastapi`
+    has to still be the stub at that point, not just while importing.
+    """
     _CLIENT_CALLS.clear()
+    with _scoped_stubs():
+        module = _load_module()
 
-    # getNodeConfig merges the selected profile and is exercised elsewhere; here
-    # the point is what the store does with the config it ends up holding.
-    monkeypatch.setattr(module.Config, 'getNodeConfig', staticmethod(lambda *_a, **_k: config))
-    monkeypatch.setattr(module.DocumentStoreBase, '__init__', lambda self, *_a, **_k: None)
+        # getNodeConfig merges the selected profile and is exercised elsewhere;
+        # here the point is what the store does with the config it holds.
+        monkeypatch.setattr(module.Config, 'getNodeConfig', staticmethod(lambda *_a, **_k: config))
+        monkeypatch.setattr(module.DocumentStoreBase, '__init__', lambda self, *_a, **_k: None)
 
-    module.Store('chroma', {}, {})
+        module.Store('chroma', {}, {})
+
     assert _CLIENT_CALLS, 'the store never constructed a client'
     return _CLIENT_CALLS[-1]
 
@@ -199,50 +214,54 @@ class TestTimeoutShim:
 
     def test_a_session_built_with_no_timeout_gets_one(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _connect(monkeypatch, {'mode': 'local', 'host': 'localhost'})
-        import chromadb.api.fastapi as patched
-
-        client = patched.httpx.Client()
+        assert _FASTAPI_STUB is not None
+        client = _FASTAPI_STUB.httpx.Client()
         assert client.timeout.connect == 30.0
         assert client.timeout.read == 120.0
 
     def test_an_explicit_timeout_is_preserved(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        _connect(monkeypatch, {'mode': 'local', 'host': 'localhost'})
-        import chromadb.api.fastapi as patched
         import httpx
 
-        client = patched.httpx.Client(timeout=httpx.Timeout(5.0))
+        _connect(monkeypatch, {'mode': 'local', 'host': 'localhost'})
+        assert _FASTAPI_STUB is not None
+        client = _FASTAPI_STUB.httpx.Client(timeout=httpx.Timeout(5.0))
         assert client.timeout.read == 5.0
 
     def test_the_shim_is_applied_once(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # Re-wrapping on every Store would nest the subclass without bound.
         _connect(monkeypatch, {'mode': 'local', 'host': 'localhost'})
-        import chromadb.api.fastapi as patched
-
-        first = patched.httpx
+        assert _FASTAPI_STUB is not None
+        first_module = _FASTAPI_STUB
+        first_httpx = first_module.httpx
         _connect(monkeypatch, {'mode': 'local', 'host': 'localhost'})
-        assert patched.httpx is first
+        # A second Store rebuilds the stub module, so assert on the one it saw.
+        assert first_module.httpx is first_httpx
 
     def test_other_httpx_names_still_resolve(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # The shim only shadows Client; everything else falls through to httpx.
-        _connect(monkeypatch, {'mode': 'local', 'host': 'localhost'})
-        import chromadb.api.fastapi as patched
         import httpx
 
-        assert patched.httpx.Timeout is httpx.Timeout
+        _connect(monkeypatch, {'mode': 'local', 'host': 'localhost'})
+        assert _FASTAPI_STUB is not None
+        assert _FASTAPI_STUB.httpx.Timeout is httpx.Timeout
 
     def test_a_store_still_connects_when_the_shim_cannot_apply(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # Hardening, not a feature: if chromadb reorganises its transport module
         # the store must still connect, just without the default timeout.
-        module = _load_module()
         _CLIENT_CALLS.clear()
-        monkeypatch.setattr(
-            module.Config,
-            'getNodeConfig',
-            staticmethod(lambda *_a, **_k: {'mode': 'local', 'host': 'localhost'}),
-        )
-        monkeypatch.setattr(module.DocumentStoreBase, '__init__', lambda self, *_a, **_k: None)
-        monkeypatch.delitem(sys.modules, 'chromadb.api.fastapi', raising=False)
-        monkeypatch.setattr(sys.modules['chromadb.api'], 'fastapi', None, raising=False)
+        with _scoped_stubs():
+            module = _load_module()
+            monkeypatch.setattr(
+                module.Config,
+                'getNodeConfig',
+                staticmethod(lambda *_a, **_k: {'mode': 'local', 'host': 'localhost'}),
+            )
+            monkeypatch.setattr(module.DocumentStoreBase, '__init__', lambda self, *_a, **_k: None)
+            # Take the transport module away, which is what a reorganised
+            # chromadb looks like from here.
+            monkeypatch.delitem(sys.modules, 'chromadb.api.fastapi', raising=False)
+            monkeypatch.delattr(sys.modules['chromadb.api'], 'fastapi', raising=False)
 
-        module.Store('chroma', {}, {})
+            module.Store('chroma', {}, {})
+
         assert _CLIENT_CALLS, 'a failed shim must not stop the store connecting'
