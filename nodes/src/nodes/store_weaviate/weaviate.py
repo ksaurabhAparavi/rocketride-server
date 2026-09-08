@@ -45,7 +45,7 @@ from weaviate.classes.config import VectorDistances
 from weaviate.util import generate_uuid5
 import weaviate.classes.config as wc
 
-from weaviate.exceptions import UnexpectedStatusCodeError
+from weaviate.exceptions import UnexpectedStatusCodeError, WeaviateBaseError
 
 from ai.common.schema import Doc, DocFilter, DocMetadata, QuestionText
 from ai.common.store import DocumentStoreBase
@@ -235,11 +235,17 @@ class Store(DocumentStoreBase):
                         distance_metric=self.similarity,
                     ),
                 )
-            except UnexpectedStatusCodeError as hfreshError:
+            except WeaviateBaseError as hfreshError:
                 # The hfresh attempt is the workaround, not the diagnosis. A 422
                 # that was never about the index type (a rejected property, say)
                 # fails both calls, and the first error is the one that explains
                 # why, so report it and keep this one as context.
+                #
+                # Catching the base class rather than UnexpectedStatusCodeError:
+                # a connection or timeout error on the retry derives from
+                # WeaviateBaseError, not from it, and would otherwise propagate
+                # and replace the actionable "hnsw not allowed" error with a
+                # network failure that says nothing about the real cause.
                 raise hnswError from hfreshError
 
     def _convertFilter(self, docFilter: DocFilter) -> Filter:

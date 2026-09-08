@@ -200,3 +200,29 @@ def test_a_422_that_is_not_about_the_index_reports_the_original_error():
     assert excinfo.value is hnsw_error, 'the actionable error must win'
     assert excinfo.value.__cause__ is hfresh_error, 'the retry failure is kept as context'
     assert [call['vector_index_config']['type'] for call in collections.calls] == ['hnsw', 'hfresh']
+
+
+def test_a_network_failure_on_the_retry_still_reports_the_hnsw_error():
+    """The retry's own failure must not replace the error that explains the cause.
+
+    A connection or timeout error derives from WeaviateBaseError rather than
+    UnexpectedStatusCodeError, so a handler catching only the latter would let it
+    propagate and bury the actionable "hnsw is not allowed" 422 under a network
+    message that says nothing about why the collection could not be created.
+    """
+    module = _load_module()
+    from weaviate.exceptions import WeaviateConnectionError
+
+    hnsw_error = _status_error(module, 422, 'hnsw is not allowed for vector_index_type')
+
+    def fail_for(index_type):
+        return hnsw_error if index_type == 'hnsw' else WeaviateConnectionError('connection refused')
+
+    store, collections = _make_store(module, fail_for=fail_for)
+
+    with pytest.raises(module.UnexpectedStatusCodeError) as raised:
+        store._createCollection()
+
+    assert raised.value is hnsw_error
+    assert isinstance(raised.value.__cause__, WeaviateConnectionError)
+    assert [call['vector_index_config']['type'] for call in collections.calls] == ['hnsw', 'hfresh']
