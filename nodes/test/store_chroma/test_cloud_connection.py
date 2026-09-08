@@ -5,7 +5,7 @@
 
 """How the Chroma store reaches Chroma Cloud.
 
-Three defects stacked here and each is silent in its own way, so each gets a
+Two defects stacked here and each is silent in its own way, so each gets a
 test that fails if the fix is undone:
 
 - the cloud branch was never taken, because ``getNodeConfig`` consumes the
@@ -14,9 +14,6 @@ test that fails if the fix is undone:
 - authentication moved off the removed ``Settings`` / ``TokenAuthClientProvider``
   path onto the ``x-chroma-token`` header, and Chroma Cloud additionally wants
   the tenant and database;
-- chromadb builds its httpx session with ``timeout=None``, so an unresponsive
-  server hangs the pipeline with no error to read.
-
 Loads ``chroma.py`` the way the sibling suites do, stubbing only the
 third-party packages.
 """
@@ -44,11 +41,6 @@ _STUB_MODULE_NAMES = (
 
 #: Every kwarg the store hands to chromadb.HttpClient, newest call last.
 _CLIENT_CALLS: list[dict] = []
-
-#: The stub transport module the shim patches. Held here rather than re-imported
-#: in the tests: the stubs are scoped to loading `chroma.py` and are gone by the
-#: time a test body runs, and the real chromadb is not installed.
-_FASTAPI_STUB: types.ModuleType | None = None
 
 
 def _install_stubs() -> None:
@@ -79,9 +71,6 @@ def _install_stubs() -> None:
     chromadb_api.fastapi = chromadb_fastapi
     sys.modules['chromadb.api'] = chromadb_api
     sys.modules['chromadb.api.fastapi'] = chromadb_fastapi
-
-    global _FASTAPI_STUB
-    _FASTAPI_STUB = chromadb_fastapi
 
     numpy_mod = types.ModuleType('numpy')
     numpy_mod.exp = math.exp
@@ -209,59 +198,25 @@ class TestTenantAndDatabase:
         assert 'tenant' not in kwargs
 
 
-class TestTimeoutShim:
-    """The shim cannot be reviewed by reading, so pin what it does."""
+class TestTlsIsConfigurable:
+    """Chroma Cloud is HTTPS-only, but this profile also covers plain-HTTP servers."""
 
-    def test_a_session_built_with_no_timeout_gets_one(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        _connect(monkeypatch, {'mode': 'local', 'host': 'localhost'})
-        assert _FASTAPI_STUB is not None
-        client = _FASTAPI_STUB.httpx.Client()
-        assert client.timeout.connect == 30.0
-        assert client.timeout.read == 120.0
+    def test_tls_is_on_by_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        kwargs = _connect(monkeypatch, {'mode': 'cloud', 'host': 'h', 'apikey': 'k'})
+        assert kwargs['ssl'] is True
 
-    def test_an_explicit_timeout_is_preserved(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        import httpx
+    def test_tls_can_be_turned_off(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # A self-hosted server behind plain HTTP with token auth worked before
+        # the Settings path was removed; it must keep working.
+        kwargs = _connect(monkeypatch, {'mode': 'cloud', 'host': 'h', 'apikey': 'k', 'ssl': False})
+        assert kwargs['ssl'] is False
 
-        _connect(monkeypatch, {'mode': 'local', 'host': 'localhost'})
-        assert _FASTAPI_STUB is not None
-        client = _FASTAPI_STUB.httpx.Client(timeout=httpx.Timeout(5.0))
-        assert client.timeout.read == 5.0
+    def test_the_string_false_from_an_env_var_turns_it_off(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        kwargs = _connect(monkeypatch, {'mode': 'cloud', 'host': 'h', 'apikey': 'k', 'ssl': 'false'})
+        assert kwargs['ssl'] is False
 
-    def test_the_shim_is_applied_once(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        # Re-wrapping on every Store would nest the subclass without bound.
-        _connect(monkeypatch, {'mode': 'local', 'host': 'localhost'})
-        assert _FASTAPI_STUB is not None
-        first_module = _FASTAPI_STUB
-        first_httpx = first_module.httpx
-        _connect(monkeypatch, {'mode': 'local', 'host': 'localhost'})
-        # A second Store rebuilds the stub module, so assert on the one it saw.
-        assert first_module.httpx is first_httpx
-
-    def test_other_httpx_names_still_resolve(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        # The shim only shadows Client; everything else falls through to httpx.
-        import httpx
-
-        _connect(monkeypatch, {'mode': 'local', 'host': 'localhost'})
-        assert _FASTAPI_STUB is not None
-        assert _FASTAPI_STUB.httpx.Timeout is httpx.Timeout
-
-    def test_a_store_still_connects_when_the_shim_cannot_apply(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        # Hardening, not a feature: if chromadb reorganises its transport module
-        # the store must still connect, just without the default timeout.
-        _CLIENT_CALLS.clear()
-        with _scoped_stubs():
-            module = _load_module()
-            monkeypatch.setattr(
-                module.Config,
-                'getNodeConfig',
-                staticmethod(lambda *_a, **_k: {'mode': 'local', 'host': 'localhost'}),
-            )
-            monkeypatch.setattr(module.DocumentStoreBase, '__init__', lambda self, *_a, **_k: None)
-            # Take the transport module away, which is what a reorganised
-            # chromadb looks like from here.
-            monkeypatch.delitem(sys.modules, 'chromadb.api.fastapi', raising=False)
-            monkeypatch.delattr(sys.modules['chromadb.api'], 'fastapi', raising=False)
-
-            module.Store('chroma', {}, {})
-
-        assert _CLIENT_CALLS, 'a failed shim must not stop the store connecting'
+    def test_an_unresolved_placeholder_keeps_tls_on(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # '${...}' is a missing env var, not a deliberate opt-out, so it must not
+        # silently downgrade the connection to plaintext.
+        kwargs = _connect(monkeypatch, {'mode': 'cloud', 'host': 'h', 'apikey': 'k', 'ssl': '${ROCKETRIDE_CHROMA_SSL}'})
+        assert kwargs['ssl'] is True

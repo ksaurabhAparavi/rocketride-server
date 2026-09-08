@@ -196,6 +196,13 @@
 			"type": "string",
 			"default": ""
 		},
+		"chroma.ssl": {
+			"title": "Use TLS",
+			"description": "Connect over HTTPS. Required for Chroma Cloud, which serves HTTPS only. Turn it off for a self-hosted server reached over plain HTTP.",
+			"type": "boolean",
+			"default": true,
+			"optional": true
+		},
 		"chroma.database": {
 			"title": "Database",
 			"description": "Chroma Cloud database name (required for Chroma Cloud, optional for self-hosted multi-tenant servers)",
@@ -204,7 +211,7 @@
 		},
 		"chroma.cloud": {
 			"object": "cloud",
-			"properties": ["vector.cloud.host", "vector.cloud.port", "vector.apikey", "chroma.tenant", "chroma.database", "vector.collection", "chroma.serverName"]
+			"properties": ["vector.cloud.host", "vector.cloud.port", "vector.apikey", "chroma.tenant", "chroma.database", "vector.collection", "chroma.serverName", "chroma.ssl"]
 		},
 		"chroma.local": {
 			"object": "local",

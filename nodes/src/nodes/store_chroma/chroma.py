@@ -32,7 +32,7 @@ import chromadb
 from ai.common.schema import Doc, DocFilter, DocMetadata, QuestionText
 from ai.common.store import DocumentStoreBase
 from ai.common.config import Config
-from rocketlib import debug, warning
+from rocketlib import debug
 import uuid
 import numpy as np
 import json
@@ -77,6 +77,18 @@ class Store(DocumentStoreBase):
     client: chromadb.HttpClient
     collectionObj: chromadb.Collection | None = None
 
+    @staticmethod
+    def _coerceBool(value: Any) -> bool:
+        """Read a boolean that may arrive as a string from an env-var placeholder."""
+        if isinstance(value, bool):
+            return value
+        text = str(value).strip().lower()
+        if text in ('false', '0', 'no', 'off'):
+            return False
+        # An unresolved '${...}' placeholder is not a deliberate 'off', so it
+        # keeps the safe default rather than silently dropping TLS.
+        return True
+
     def __init__(self, provider: str, connConfig: Dict[str, Any], bag: Dict[str, Any]):
         """
         Initialize the chroma vector store.
@@ -105,6 +117,10 @@ class Store(DocumentStoreBase):
         self.tenant = (config.get('tenant') or '').strip() or None
         self.database = (config.get('database') or '').strip() or None
 
+        # TLS for the cloud/remote profile. Defaults on, since Chroma Cloud is
+        # HTTPS-only; a self-hosted server behind plain HTTP turns it off.
+        self.ssl = self._coerceBool(config.get('ssl', True))
+
         self.renderChunkSize = config.get('renderChunkSize', self.renderChunkSize)
         self.payload_limit = config.get('payloadLimit', self.payload_limit)
 
@@ -122,43 +138,6 @@ class Store(DocumentStoreBase):
         else:
             raise Exception('The metric you provided in the config.json does not match required chroma configurations')
 
-        # The chromadb client builds its httpx session with timeout=None and
-        # issues its first request while HttpClient() is still constructing,
-        # so one unresponsive connection hangs the whole pipeline forever.
-        # Give every session created by chromadb's transport module a default
-        # timeout.
-        #
-        # Scope: the replacement only shadows the `httpx` name inside
-        # chromadb.api.fastapi, which is where this client builds its sessions.
-        # Nothing else in the process sees it, and any explicit timeout the
-        # caller passes is preserved. chromadb-client exposes no supported
-        # timeout setting, which is why the default is installed this way.
-        try:
-            import httpx
-            import chromadb.api.fastapi as _chroma_fastapi
-
-            if not getattr(_chroma_fastapi, '_rocketrideTimeoutShim', False):
-
-                class _HttpxShim:
-                    class Client(httpx.Client):
-                        def __init__(self, *args, **kwargs):
-                            if kwargs.get('timeout', 'unset') in (None, 'unset'):
-                                kwargs['timeout'] = httpx.Timeout(120.0, connect=30.0)
-                            super().__init__(*args, **kwargs)
-
-                    def __getattr__(self, name):
-                        return getattr(httpx, name)
-
-                _chroma_fastapi.httpx = _HttpxShim()
-                _chroma_fastapi._rocketrideTimeoutShim = True
-        except Exception as exc:
-            # This is hardening against an upstream default, not a feature, so a
-            # failure here must not stop the node from connecting: if chromadb
-            # reorganises its transport module the store still works, just
-            # without the timeout. Say so rather than failing silently, because
-            # the symptom otherwise is a pipeline that hangs with no explanation.
-            warning(f'chroma: HTTP timeout shim not applied ({exc}); an unresponsive server may hang requests')
-
         # The Chroma client connects eagerly (identity/tenant validation on construction),
         # so an incompatible/old server surfaces here as a cryptic error (e.g.
         # KeyError('_type')). Wrap it so the user gets an actionable message instead of a
@@ -167,11 +146,15 @@ class Store(DocumentStoreBase):
             if profile == 'local':
                 self.client = chromadb.HttpClient(host=self.host, port=self.port)
             else:
-                # Cloud / remote server. TLS is required: Chroma Cloud only
-                # serves HTTPS, and a plain HTTP request against the TLS port
-                # hangs or is rejected with "illegal request line". The API
-                # key travels in the x-chroma-token header, and Chroma Cloud
-                # additionally requires the tenant and database.
+                # Cloud / remote server. Chroma Cloud only serves HTTPS, and a
+                # plain HTTP request against the TLS port hangs or is rejected
+                # with "illegal request line" -- so TLS is the default. It stays
+                # configurable because this profile also covers a self-hosted
+                # server reached over plain HTTP with token auth, which the
+                # removed Settings path supported and which would otherwise lose
+                # its only working configuration.
+                # The API key travels in the x-chroma-token header, and Chroma
+                # Cloud additionally requires the tenant and database.
                 kwargs: Dict[str, Any] = {}
                 if self.tenant:
                     kwargs['tenant'] = self.tenant
@@ -180,7 +163,7 @@ class Store(DocumentStoreBase):
                 self.client = chromadb.HttpClient(
                     host=self.host,
                     port=self.port,
-                    ssl=True,
+                    ssl=self.ssl,
                     headers={'x-chroma-token': self.apikey} if self.apikey else None,
                     **kwargs,
                 )

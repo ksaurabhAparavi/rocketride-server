@@ -109,6 +109,7 @@ The `port` field accepts either a number or a string. Enter a plain integer such
 | `chroma.profile` | `string` | **Type of chroma host**<br/>Connect to... | `"local"` |
 | `chroma.provider` | `string` |  | const: `"chroma"` |
 | `chroma.serverName` | `string` | **Tool Server Name**<br/>Namespace for agent-facing tool names, e.g. 'chroma' exposes tools as chroma.search / chroma.upsert / chroma.delete. Change this when running multiple Chroma nodes in the same pipeline so their tool names do not collide. | `"chroma"` |
+| `chroma.ssl` | `boolean` | **Use TLS**<br/>Connect over HTTPS. Required for Chroma Cloud, which serves HTTPS only. Turn it off for a self-hosted server reached over plain HTTP. | `true` |
 | `chroma.tenant` | `string` | **Tenant**<br/>Chroma Cloud tenant id (required for Chroma Cloud, optional for self-hosted multi-tenant servers) | `""` |
 | `vector.cloud.host` |  | Enter the server IP address e.g. <your-instance-url> |  |
 | `vector.cloud.port` | `number,string` | Port number. Enter a plain integer such as 443, or an env-var placeholder like ${ROCKETRIDE_CHROMA_PORT}. Placeholders resolve to a string at run time, so this field accepts both a number and a string; the node coerces the value to an integer before connecting, so either form works. | `"443"` |
