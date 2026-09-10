@@ -141,10 +141,19 @@ class _ForwardRecorder:
         return output
 
 
+class _ModelBundle(list):
+    """Weak-referenceable stand-in for a loaded model bundle.
+
+    Production's ``actual_model`` is an ``nn.Module`` (weak-referenceable); a
+    plain ``list`` is not, so it silently exercises ``_get_model_lock``'s
+    no-eviction fallback instead of the path production actually takes.
+    """
+
+
 def _make_model(recorder):
     """Build a model bundle shaped like actual_model[0].auto_model."""
     module = types.SimpleNamespace(auto_model=recorder)
-    return [module]
+    return _ModelBundle([module])
 
 
 def _make_preprocessed(batch=2, seq=4):
@@ -177,11 +186,7 @@ def test_get_model_lock_is_stable_per_model():
 
 def test_get_model_lock_entry_is_dropped_when_model_is_collected():
     """A retired model's lock entry does not linger in the registry."""
-
-    class _Model(list):
-        """Weak-referenceable stand-in for a loaded model bundle."""
-
-    model = _Model([types.SimpleNamespace(auto_model=_ForwardRecorder())])
+    model = _make_model(_ForwardRecorder())
     model_id = id(model)
 
     SentenceTransformerLoader._get_model_lock(model)
@@ -195,7 +200,7 @@ def test_get_model_lock_entry_is_dropped_when_model_is_collected():
 
 def test_get_model_lock_tolerates_models_without_weakref_support():
     """A model that cannot be weak-referenced still gets a working lock."""
-    model = _make_model(_ForwardRecorder())  # plain list: no __weakref__
+    model = [types.SimpleNamespace(auto_model=_ForwardRecorder())]  # plain list: no __weakref__
 
     lock = SentenceTransformerLoader._get_model_lock(model)
 
